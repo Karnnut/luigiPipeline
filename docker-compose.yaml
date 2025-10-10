@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:15
+    image: postgres:16
     environment:
       POSTGRES_DB: weather
       POSTGRES_USER: luigi
@@ -42,14 +42,6 @@ services:
     depends_on:
       - db
       - luigi-scheduler
-    deploy:
-      resources:
-        limits:
-          memory: 18G
-        reservations:
-          memory: 6G
-    memswap_limit: 8G
-    oom_kill_disable: false
 
 volumes:
   postgres_data:

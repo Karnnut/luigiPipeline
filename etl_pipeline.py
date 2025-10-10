@@ -8,9 +8,7 @@ import glob
 DB_URI = "postgresql+psycopg2://luigi:luigi@db:5432/weather"
 
 
-# -----------------------
-# 1. Extract Pressure Level Data
-# -----------------------
+#Extract Pressure Level Data
 class ExtractPressureLevels(luigi.Task):
     input_path = luigi.Parameter(default="data/raw/pressure_levels_1_hour.grib")
     output_path = luigi.Parameter(default="data/processed/pressure_levels.parquet")
@@ -44,28 +42,25 @@ class ExtractPressureLevels(luigi.Task):
         df.to_parquet(self.output_path, index=False)
         print(f"✅ Saved pressure_levels parquet to {self.output_path}")
 
-
-# -----------------------
-# 2. Extract Land TP Data (loop over all Land_{month}_{year}.grib)
-# -----------------------
 class ExtractAllLandTP(luigi.Task):
     input_dir = luigi.Parameter(default="data/raw")
+    output_dir = luigi.Parameter(default="data/processed/csv_land_tp")
     output_path = luigi.Parameter(default="data/processed/all_land_tp.parquet")
 
     def output(self):
         return luigi.LocalTarget(self.output_path)
 
     def run(self):
-        all_files = sorted(glob.glob(os.path.join(self.input_dir, "Land_*.grib")))
-        os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
 
+        all_files = sorted(glob.glob(os.path.join(self.input_dir, "Land_*.grib")))
         if not all_files:
             raise ValueError(f"No GRIB files found in {self.input_dir}")
 
         all_dataframes = []
 
         for file in all_files:
-            print(f"📘 Processing file: {file}")
+            print(f"Processing file: {file}")
             try:
                 ds = xr.open_dataset(file, engine="cfgrib", filter_by_keys={"typeOfLevel": "surface"})
 
@@ -75,7 +70,7 @@ class ExtractAllLandTP(luigi.Task):
                     df = pd.DataFrame([{var: float(ds[var].values) for var in ds.data_vars}])
 
                 if 'tp' not in df.columns:
-                    print(f"⚠️ Skipping {file}: missing 'tp' column")
+                    print(f"Skipping {file}: missing 'tp' column")
                     continue
 
                 # Handle datetime
@@ -88,6 +83,7 @@ class ExtractAllLandTP(luigi.Task):
                     df['date'] = df['time'].dt.date
                     df['time'] = df['time'].dt.time
 
+                # Keep only relevant columns
                 keep_cols = ['date', 'time', 'latitude', 'longitude', 'tp']
                 df = df[[c for c in keep_cols if c in df.columns]]
 
@@ -95,22 +91,26 @@ class ExtractAllLandTP(luigi.Task):
                 df['longitude'] = df['longitude'].round(4)
                 df['tp'] = df['tp'].fillna(0)
 
+                # Save CSV for each file
+                csv_filename = os.path.join(self.output_dir, os.path.basename(file).replace(".grib", ".csv"))
+                df.to_csv(csv_filename, index=False)
+                print(f"Saved CSV: {csv_filename}")
+
                 all_dataframes.append(df)
 
             except Exception as e:
-                print(f"❌ Failed to process {file}: {e}")
+                print(f"Failed to process {file}: {e}")
 
+        # Combine all into one Parquet
         if not all_dataframes:
             raise ValueError("No valid TP data found in any Land_*.grib files!")
 
         final_df = pd.concat(all_dataframes, ignore_index=True)
         final_df.to_parquet(self.output_path, index=False)
-        print(f"✅ Saved all Land TP data to {self.output_path}")
+        print(f"Saved combined Parquet: {self.output_path}")
 
 
-# -----------------------
-# 3. Load to Database
-# -----------------------
+# Load combined data to DB
 class LoadAllTPToDatabase(luigi.Task):
     def requires(self):
         return ExtractAllLandTP()
@@ -122,12 +122,10 @@ class LoadAllTPToDatabase(luigi.Task):
         engine = create_engine(DB_URI)
         tp_df = pd.read_parquet(self.input().path)
 
-        # Ensure columns
         tp_df['latitude'] = tp_df['latitude'].round(4)
         tp_df['longitude'] = tp_df['longitude'].round(4)
         tp_df['time'] = tp_df['time'].astype(str)
 
-        # Create table if not exists
         create_table_query = """
         CREATE TABLE IF NOT EXISTS weather_precision_data (
             id SERIAL PRIMARY KEY,
@@ -141,22 +139,18 @@ class LoadAllTPToDatabase(luigi.Task):
         with engine.begin() as conn:
             conn.execute(text(create_table_query))
 
-        # Write to DB
         tp_df.to_sql(
             "weather_precision_data",
             con=engine,
-            if_exists="append",  # append each batch instead of replace
+            if_exists="append",
             index=False,
             chunksize=5000
         )
 
         with self.output().open("w") as f:
             f.write("All Land TP data loaded successfully\n")
-        print("✅ All Land TP data loaded to PostgreSQL (table: weather_precision_data)")
+        print("All Land TP data loaded to PostgreSQL")
 
 
-# -----------------------
-# 4. Run Luigi Pipeline
-# -----------------------
 if __name__ == "__main__":
-    luigi.build([LoadAllTPToDatabase()], local_scheduler=True)
+    luigi.build([LoadAllTPToDatabase()])
