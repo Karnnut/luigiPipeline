@@ -12,7 +12,7 @@
 *.parquet
 
 # Generic index or identifier files
-*.ids
+*.idx
 
 # --- WARNING: Ignoring all .txt files ---
 # Be careful! This will also ignore important files like README.txt or LICENSE.txt.
