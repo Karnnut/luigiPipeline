@@ -19,3 +19,4 @@
 # A better approach is to ignore .txt files only in a specific directory.
 # See the "Pro Tip" section below for a safer alternative.
 *.txt
+*.csv
