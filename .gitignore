@@ -1,0 +1,21 @@
+# Ignore files by extension
+
+# GRIB (Gridded Binary) meteorological data files
+*.grib
+
+# macOS desktop services store files
+# .Ds_store is a common typo, .DS_Store is the correct one.
+.DS_Store
+.Ds_store
+
+# Apache Parquet columnar storage files
+*.parquet
+
+# Generic index or identifier files
+*.ids
+
+# --- WARNING: Ignoring all .txt files ---
+# Be careful! This will also ignore important files like README.txt or LICENSE.txt.
+# A better approach is to ignore .txt files only in a specific directory.
+# See the "Pro Tip" section below for a safer alternative.
+*.txt
