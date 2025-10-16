@@ -1,5 +1,6 @@
 import luigi
 import pandas as pd
+import polars as pl
 import xarray as xr
 import os
 import glob
@@ -15,7 +16,7 @@ DB_URL = "postgresql+psycopg2://luigi:luigi@db:5432/weather"
 
 
 # =========================
-# 1️⃣ Extract Pressure Levels
+# Extract Pressure Levels
 # =========================
 class ExtractPressureLevels(luigi.Task):
     input_path = luigi.Parameter(default=PRESSURE_FILE)
@@ -28,37 +29,50 @@ class ExtractPressureLevels(luigi.Task):
         print(f"📘 Loading pressure dataset: {self.input_path}")
 
         try:
-            ds = xr.open_dataset(self.input_path, engine="cfgrib")
+            ds = xr.open_dataset(self.input_path, engine="cfgrib", filter_by_keys={"numberOfPoints": 2600})
         except Exception as e:
-            raise RuntimeError(f"❌ Failed to open {self.input_path}: {e}")
+            raise RuntimeError(f"Failed to open {self.input_path}: {e}")
 
-        df = ds.to_dataframe().reset_index()
+        # Convert xarray dataset to pandas first, then to polars
+        pandas_df = ds.to_dataframe().reset_index()
+        df = pl.from_pandas(pandas_df)
 
         # Drop step if exists
         if 'step' in df.columns:
-            df.drop(columns=['step'], inplace=True)
+            df = df.drop('step')
 
         # Extract date from valid_time
         if 'valid_time' in df.columns:
-            df['date'] = pd.to_datetime(df['valid_time']).dt.date
-            df.drop(columns=['valid_time'], inplace=True)
+            df = df.with_columns([
+                pl.col('valid_time').dt.date().alias('date'),
+                pl.col('valid_time').dt.time().cast(pl.Utf8).alias('time')
+            ]).drop('valid_time')
         elif 'time' in df.columns:
-            df['date'] = pd.to_datetime(df['time']).dt.date
-            df.drop(columns=['time'], inplace=True)
+            df = df.with_columns([
+                pl.col('time').dt.date().alias('date'),
+                pl.col('time').dt.time().cast(pl.Utf8).alias('time')
+            ])
 
-        df = df.fillna(0)
+        df = df.fill_null(0)
 
         if 'latitude' in df.columns and 'longitude' in df.columns:
-            df['latitude'] = df['latitude'].round(4)
-            df['longitude'] = df['longitude'].round(4)
+            df = df.with_columns([
+                pl.col('latitude').round(4),
+                pl.col('longitude').round(4)
+            ])
 
         os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
-        df.to_csv(self.output_path, index=False)
-        print(f"✅ Saved CSV: {self.output_path}")
+        df.write_csv(self.output_path)
+        print(f"Saved CSV: {self.output_path}")
+        print(f" Pressure file shape: {df.shape}")
+        print(f" Pressure columns: {df.columns}")
+        print(f" Sample dates: {df.select('date').unique().head(3).to_series().to_list()}")
+        if 'time' in df.columns:
+            print(f" Sample times: {df.select('time').unique().head(3).to_series().to_list()}")
 
 
 # =========================
-# 2️⃣ Extract All Land TP Files
+# Extract All Land TP Files
 # =========================
 class ExtractAllLandTP(luigi.Task):
     input_dir = luigi.Parameter(default="data/raw")
@@ -72,55 +86,61 @@ class ExtractAllLandTP(luigi.Task):
         all_files = sorted(glob.glob(os.path.join(self.input_dir, "Land_*.grib")))
 
         if not all_files:
-            raise ValueError(f"❌ No GRIB files found in {self.input_dir}")
+            raise ValueError(f"No GRIB files found in {self.input_dir}")
 
         for file in all_files:
             csv_file = os.path.join(self.output_dir, os.path.basename(file).replace(".grib", ".csv"))
 
             if os.path.exists(csv_file):
-                print(f"⏩ Skipping {file}: CSV already exists")
+                print(f"Skipping {file}: CSV already exists")
                 continue
 
             print(f"📘 Processing {file}")
             try:
                 ds = xr.open_dataset(file, engine="cfgrib", filter_by_keys={"typeOfLevel": "surface"})
             except Exception as e:
-                print(f"⚠️ Failed to open {file}: {e}")
+                print(f"Failed to open {file}: {e}")
                 continue
 
-            df = ds.to_dataframe().reset_index()
+            pandas_df = ds.to_dataframe().reset_index()
+            df = pl.from_pandas(pandas_df)
+            
             if 'step' in df.columns:
-                df.drop(columns=['step'], inplace=True)
+                df = df.drop('step')
 
             if 'tp' not in df.columns:
-                print(f"⚠️ Skipping {file}: missing 'tp'")
+                print(f"Skipping {file}: missing 'tp'")
                 continue
 
             if 'valid_time' in df.columns:
-                df['valid_time'] = pd.to_datetime(df['valid_time'])
-                df['date'] = df['valid_time'].dt.date
-                df['time'] = df['valid_time'].dt.time
+                df = df.with_columns([
+                    pl.col('valid_time').dt.date().alias('date'),
+                    pl.col('valid_time').dt.time().cast(pl.Utf8).alias('time')
+                ]).drop('valid_time')
             elif 'time' in df.columns:
-                df['time'] = pd.to_datetime(df['time'])
-                df['date'] = df['time'].dt.date
-                df['time'] = df['time'].dt.time
+                df = df.with_columns([
+                    pl.col('time').dt.date().alias('date'),
+                    pl.col('time').dt.time().cast(pl.Utf8).alias('time')
+                ])
 
-            df = df[['date', 'time', 'latitude', 'longitude', 'tp']]
-            df['latitude'] = df['latitude'].round(4)
-            df['longitude'] = df['longitude'].round(4)
-            df['tp'] = df['tp'].fillna(0)
+            df = df.select(['date', 'time', 'latitude', 'longitude', 'tp'])
+            df = df.with_columns([
+                pl.col('latitude').round(4),
+                pl.col('longitude').round(4),
+                pl.col('tp').fill_null(0)
+            ])
 
-            df.to_csv(csv_file, index=False)
-            print(f"✅ Saved Land CSV: {csv_file}")
+            df.write_csv(csv_file)
+            print(f"Saved Land CSV: {csv_file}")
 
             time.sleep(0.5)
 
         with self.output().open("w") as f:
-            f.write("✅ Land TP CSV extraction done\n")
+            f.write("Land TP CSV extraction done\n")
 
 
 # =========================
-# 3️⃣ Merge Pressure + Land TP
+# Merge Pressure + Land TP
 # =========================
 class ExtractAndMergeLandTP(luigi.Task):
     input_dir = luigi.Parameter(default="data/raw")
@@ -140,69 +160,161 @@ class ExtractAndMergeLandTP(luigi.Task):
     def run(self):
         os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-        pressure_df = pd.read_csv(self.pressure_csv)
+        # Load pressure data
+        pressure_df = pl.read_csv(self.pressure_csv)
         if 'step' in pressure_df.columns:
-            pressure_df.drop(columns=['step'], inplace=True)
+            pressure_df = pressure_df.drop('step')
 
-        pressure_df['date'] = pd.to_datetime(pressure_df['date']).dt.date
-        if 'time' not in pressure_df.columns:
-            pressure_df['time'] = ""
+        # Ensure date is datetime
+        pressure_df = pressure_df.with_columns(
+            pl.col('date').str.to_date()
+        )
+        
+        # Initialize tp column with null if it doesn't exist
+        if 'tp' not in pressure_df.columns:
+            pressure_df = pressure_df.with_columns(
+                pl.lit(None).cast(pl.Float64).alias('tp')
+            )
+        
+        print(f" Pressure DataFrame initial shape: {pressure_df.shape}")
+        print(f" Pressure columns: {pressure_df.columns}")
+        print(f" Pressure date type: {pressure_df.schema['date']}")
+        print(f" Sample pressure dates: {pressure_df.select('date').unique().head(3).to_series().to_list()}")
+        
+        if 'time' in pressure_df.columns:
+            print(f" Pressure time type: {pressure_df.schema['time']}")
+            print(f" Sample pressure times: {pressure_df.select('time').unique().head(5).to_series().to_list()}")
+        
+        print(f" Pressure lat range: {pressure_df['latitude'].min()} to {pressure_df['latitude'].max()}")
+        print(f" Pressure lon range: {pressure_df['longitude'].min()} to {pressure_df['longitude'].max()}")
 
-        pressure_df['tp'] = 0
-
+        # Find all Land GRIB files
         all_files = sorted(glob.glob(os.path.join(self.input_dir, "Land_*.grib")))
         if not all_files:
-            raise ValueError(f"❌ No GRIB files found in {self.input_dir}")
+            raise ValueError(f"No GRIB files found in {self.input_dir}")
 
-        for file in all_files:
-            print(f"📘 Merging {file}")
+        total_matches = 0
+        
+        # Process each Land file
+        for file_idx, file in enumerate(all_files):
+            print(f"\n📘 Merging {file} ({file_idx + 1}/{len(all_files)})")
             try:
                 ds = xr.open_dataset(file, engine="cfgrib", filter_by_keys={"typeOfLevel": "surface"})
             except Exception as e:
-                print(f"⚠️ Failed to open {file}: {e}")
+                print(f"Failed to open {file}: {e}")
                 continue
 
-            df = ds.to_dataframe().reset_index()
+            pandas_df = ds.to_dataframe().reset_index()
+            df = pl.from_pandas(pandas_df)
+            
             if 'step' in df.columns:
-                df.drop(columns=['step'], inplace=True)
+                df = df.drop('step')
+                
             if 'tp' not in df.columns:
+                print(f"Skipping {file}: missing 'tp' column")
                 continue
 
+            # Process datetime columns
             if 'valid_time' in df.columns:
-                df['valid_time'] = pd.to_datetime(df['valid_time'])
-                df['date'] = df['valid_time'].dt.date
-                df['time'] = df['valid_time'].dt.time.astype(str)
+                df = df.with_columns([
+                    pl.col('valid_time').dt.date().alias('date'),
+                    pl.col('valid_time').dt.time().cast(pl.Utf8).alias('time')
+                ]).drop('valid_time')
             elif 'time' in df.columns:
-                df['time'] = pd.to_datetime(df['time'])
-                df['date'] = df['time'].dt.date
-                df['time'] = df['time'].dt.time.astype(str)
+                df = df.with_columns([
+                    pl.col('time').dt.date().alias('date'),
+                    pl.col('time').dt.time().cast(pl.Utf8).alias('time')
+                ])
 
-            df = df[['date', 'time', 'latitude', 'longitude', 'tp']]
-            df['latitude'] = df['latitude'].round(4)
-            df['longitude'] = df['longitude'].round(4)
+            # Select and prepare columns
+            df = df.select(['date', 'time', 'latitude', 'longitude', 'tp'])
+            df = df.with_columns([
+                pl.col('latitude').round(4),
+                pl.col('longitude').round(4),
+                pl.col('tp').fill_null(0)
+            ])
 
-            pressure_df = pressure_df.merge(
+            print(f" Land file shape: {df.shape}")
+            print(f" Land date type: {df.schema['date']}")
+            print(f" Sample land dates: {df.select('date').unique().head(3).to_series().to_list()}")
+            print(f" Land time type: {df.schema['time']}")
+            print(f" Sample land times: {df.select('time').unique().head(5).to_series().to_list()}")
+            print(f" Land tp range: {df['tp'].min()} to {df['tp'].max()}")
+            print(f" Non-zero tp count: {df.filter(pl.col('tp') > 0).height}")
+
+            # Determine merge keys based on available columns
+            merge_keys = ['date', 'latitude', 'longitude']
+            if 'time' in pressure_df.columns and 'time' in df.columns:
+                merge_keys.append('time')
+                print(f" Merging on: {merge_keys}")
+            else:
+                print(f" Merging on: {merge_keys} (no time column)")
+
+            # Perform merge
+            before_merge_size = pressure_df.height
+            pressure_df = pressure_df.join(
                 df,
-                on=['date', 'time', 'latitude', 'longitude'],
+                on=merge_keys,
                 how='left',
-                suffixes=('', '_new')
+                suffix='_new'
             )
+            after_merge_size = pressure_df.height
+            
+            print(f" Rows before merge: {before_merge_size}")
+            print(f" Rows after merge: {after_merge_size}")
 
-            pressure_df['tp'] = pressure_df['tp_new'].fillna(pressure_df['tp'])
-            pressure_df.drop(columns=['tp_new'], inplace=True)
+            # Update tp values where we have new data
+            if 'tp_new' in pressure_df.columns:
+                matches = pressure_df.filter(pl.col('tp_new').is_not_null()).height
+                total_matches += matches
+                print(f" Merge matches found: {matches}")
+                
+                if matches > 0:
+                    tp_new_min = pressure_df.filter(pl.col('tp_new').is_not_null())['tp_new'].min()
+                    tp_new_max = pressure_df.filter(pl.col('tp_new').is_not_null())['tp_new'].max()
+                    print(f" tp_new range: {tp_new_min} to {tp_new_max}")
+                    
+                    # Update tp only where we have actual new data
+                    pressure_df = pressure_df.with_columns(
+                        pl.when(pl.col('tp_new').is_not_null())
+                          .then(pl.col('tp_new'))
+                          .otherwise(pl.col('tp'))
+                          .alias('tp')
+                    )
+                    
+                    print(f"Updated {matches} tp values")
+                else:
+                    print(f"No matches to update!")
+                
+                pressure_df = pressure_df.drop('tp_new')
+            else:
+                print(f"No tp_new column created - merge may have failed!")
+
+        print(f"\nTotal merge matches across all files: {total_matches}")
+        
+        # Fill remaining NaN with 0 only at the END
+        pressure_df = pressure_df.with_columns(
+            pl.col('tp').fill_null(0)
+        )
+        
+        print(f"\n Final Statistics:")
+        print(f" Final shape: {pressure_df.shape}")
+        print(f" Final tp range: {pressure_df['tp'].min()} to {pressure_df['tp'].max()}")
+        print(f" Non-zero tp count: {pressure_df.filter(pl.col('tp') > 0).height}")
+        print(f" Zero tp count: {pressure_df.filter(pl.col('tp') == 0).height}")
 
         # Save CSV and Parquet
-        pressure_df.to_csv(self.pressure_csv, index=False)
-        pressure_df.to_parquet(self.parquet_path, index=False)
-        print(f"✅ Saved merged CSV: {self.pressure_csv}")
-        print(f"✅ Saved merged Parquet: {self.parquet_path}")
+        pressure_df.write_csv(self.pressure_csv)
+        pressure_df.write_parquet(self.parquet_path)
+        print(f"Saved merged CSV: {self.pressure_csv}")
+        print(f"Saved merged Parquet: {self.parquet_path}")
 
         with self.output()["done"].open("w") as f:
-            f.write("✅ Merge complete\n")
+            f.write("Merge complete\n")
 
 
 # =========================
-# 4️⃣ Upload to PostgreSQL
+#  Upload to PostgreSQL
 # =========================
 class UploadToDatabase(luigi.Task):
     csv_path = luigi.Parameter(default=OUTPUT_CSV)
@@ -218,16 +330,60 @@ class UploadToDatabase(luigi.Task):
     def run(self):
         print(f"📦 Uploading data from {self.csv_path} to PostgreSQL...")
 
-        df = pd.read_csv(self.csv_path)
+        # Read with Polars but ensure proper date/time handling
+        df = pl.read_csv(self.csv_path)
         if 'step' in df.columns:
-            df.drop(columns=['step'], inplace=True)
+            df = df.drop('step')
 
+        # Ensure date column is properly formatted as a date
+        if 'date' in df.columns:
+            df = df.with_columns(
+                pl.col('date').str.to_date('%Y-%m-%d')
+            )
+        
+        # Convert to pandas with explicit dtypes to avoid conversion issues
+        pandas_df = df.to_pandas()
+        
+        # Ensure pandas date column is datetime type
+        if 'date' in pandas_df.columns:
+            pandas_df['date'] = pd.to_datetime(pandas_df['date']).dt.date
+            
+        # Ensure time column is string type to avoid date/time confusion
+        if 'time' in pandas_df.columns:
+            pandas_df['time'] = pandas_df['time'].astype(str)
+
+        print(f" Column types before database upload:")
+        for col in pandas_df.columns:
+            print(f"   - {col}: {pandas_df[col].dtype}")
+            
+        # Sample data check for debugging
+        print(f" Sample date values: {pandas_df['date'].head(3).tolist()}")
+        if 'time' in pandas_df.columns:
+            print(f" Sample time values: {pandas_df['time'].head(3).tolist()}")
+            
         engine = sqlalchemy.create_engine(self.db_url)
-        df.to_sql("weather_data", engine, if_exists="append", index=False)
-        print("✅ Data successfully uploaded to weather_data")
+        
+        # Optional: Drop and recreate table to ensure schema is correct
+        with engine.connect() as conn:
+            conn.execute(sqlalchemy.text("DROP TABLE IF EXISTS weather_data"))
+            conn.commit()
+            
+        # Use dtype parameter to explicitly set column types
+        pandas_df.to_sql(
+            "weather_data", 
+            engine, 
+            if_exists="append", 
+            index=False,
+            dtype={
+                'date': sqlalchemy.types.Date,
+                'time': sqlalchemy.types.String
+            }
+        )
+        
+        print("Data successfully uploaded to weather_data")
 
         with self.output().open("w") as f:
-            f.write("✅ Upload complete\n")
+            f.write("Upload complete\n")
 
 
 if __name__ == "__main__":
