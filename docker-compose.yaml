@@ -6,9 +6,12 @@ services:
       POSTGRES_USER: luigi
       POSTGRES_PASSWORD: luigi
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # # change directory from /postgresql to /pgsql
+      # - postgres_data:/var/lib/postgresql/data
+      # - postgres_data:/var/lib/pgsql/data
+      - ./initdatabase/init.sql:/docker-entrypoint-initdb.d/init.sql
     deploy:
       resources:
         limits:

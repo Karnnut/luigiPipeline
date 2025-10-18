@@ -6,13 +6,14 @@ import os
 import glob
 import time
 import sqlalchemy
+from sqlalchemy import types
 
 PRESSURE_FILE = "data/raw/pressure_levels_1_hour.grib"
 OUTPUT_DIR = "data/processed"
 OUTPUT_CSV = os.path.join(OUTPUT_DIR, "pressure_levels.csv")
 OUTPUT_PARQUET = os.path.join(OUTPUT_DIR, "pressure_levels.parquet")
 
-DB_URL = "postgresql+psycopg2://luigi:luigi@db:5432/weather"
+DB_URL = "postgresql+psycopg2://luigi:luigi@db:5432/weather_data"
 
 
 # =========================
@@ -36,6 +37,9 @@ class ExtractPressureLevels(luigi.Task):
         # Convert xarray dataset to pandas first, then to polars
         pandas_df = ds.to_dataframe().reset_index()
         df = pl.from_pandas(pandas_df)
+
+        del ds
+        del pandas_df
 
         # Drop step if exists
         if 'step' in df.columns:
@@ -69,6 +73,7 @@ class ExtractPressureLevels(luigi.Task):
         print(f" Sample dates: {df.select('date').unique().head(3).to_series().to_list()}")
         if 'time' in df.columns:
             print(f" Sample times: {df.select('time').unique().head(3).to_series().to_list()}")
+        del df
 
 
 # =========================
@@ -104,6 +109,7 @@ class ExtractAllLandTP(luigi.Task):
 
             pandas_df = ds.to_dataframe().reset_index()
             df = pl.from_pandas(pandas_df)
+            del pandas_df
             
             if 'step' in df.columns:
                 df = df.drop('step')
@@ -134,7 +140,7 @@ class ExtractAllLandTP(luigi.Task):
             print(f"Saved Land CSV: {csv_file}")
 
             time.sleep(0.5)
-
+        del df
         with self.output().open("w") as f:
             f.write("Land TP CSV extraction done\n")
 
@@ -328,60 +334,32 @@ class UploadToDatabase(luigi.Task):
         return luigi.LocalTarget(os.path.join(OUTPUT_DIR, "uploaded.txt"))
 
     def run(self):
-        print(f"📦 Uploading data from {self.csv_path} to PostgreSQL...")
-
-        # Read with Polars but ensure proper date/time handling
-        df = pl.read_csv(self.csv_path)
-        if 'step' in df.columns:
-            df = df.drop('step')
-
-        # Ensure date column is properly formatted as a date
-        if 'date' in df.columns:
-            df = df.with_columns(
-                pl.col('date').str.to_date('%Y-%m-%d')
-            )
-        
-        # Convert to pandas with explicit dtypes to avoid conversion issues
-        pandas_df = df.to_pandas()
-        
-        # Ensure pandas date column is datetime type
-        if 'date' in pandas_df.columns:
-            pandas_df['date'] = pd.to_datetime(pandas_df['date']).dt.date
-            
-        # Ensure time column is string type to avoid date/time confusion
-        if 'time' in pandas_df.columns:
-            pandas_df['time'] = pandas_df['time'].astype(str)
-
-        print(f" Column types before database upload:")
-        for col in pandas_df.columns:
-            print(f"   - {col}: {pandas_df[col].dtype}")
-            
-        # Sample data check for debugging
-        print(f" Sample date values: {pandas_df['date'].head(3).tolist()}")
-        if 'time' in pandas_df.columns:
-            print(f" Sample time values: {pandas_df['time'].head(3).tolist()}")
-            
+        print(f"📦 Uploading data from {self.parquet_path} to PostgreSQL...")
+    
         engine = sqlalchemy.create_engine(self.db_url)
-        
-        # Optional: Drop and recreate table to ensure schema is correct
-        with engine.connect() as conn:
+    
+        # Drop table once
+        with engine.begin() as conn:
             conn.execute(sqlalchemy.text("DROP TABLE IF EXISTS weather_data"))
-            conn.commit()
-            
-        # Use dtype parameter to explicitly set column types
-        pandas_df.to_sql(
-            "weather_data", 
-            engine, 
-            if_exists="append", 
-            index=False,
-            dtype={
-                'date': sqlalchemy.types.Date,
-                'time': sqlalchemy.types.String
-            }
-        )
-        
-        print("Data successfully uploaded to weather_data")
-
+    
+        # Read and upload in chunks
+        chunk_size = 10000  # Adjust based on your RAM
+        df = pl.read_parquet(self.parquet_path)
+        total_rows = df.height
+    
+        print(f"Total rows: {total_rows}, uploading in chunks of {chunk_size}")
+    
+        for i in range(0, total_rows, chunk_size):
+            chunk = df.slice(i, chunk_size)
+            chunk.to_pandas().to_sql(
+                "weather_data",
+                engine,
+                if_exists="append",
+                index=False
+            )
+            print(f"✅ Uploaded {min(i + chunk_size, total_rows)}/{total_rows} rows")
+    
+        print("✅ All data uploaded")
         with self.output().open("w") as f:
             f.write("Upload complete\n")
 
