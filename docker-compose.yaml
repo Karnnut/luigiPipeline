@@ -8,9 +8,6 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      # # change directory from /postgresql to /pgsql
-      # - postgres_data:/var/lib/postgresql/data
-      # - postgres_data:/var/lib/pgsql/data
       - ./initdatabase/init.sql:/docker-entrypoint-initdb.d/init.sql
     deploy:
       resources:
@@ -45,6 +42,28 @@ services:
     depends_on:
       - db
       - luigi-scheduler
+
+  backend:
+    build:
+      context: ./backend_python
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      DB_USER: luigi
+      DB_HOST: db
+      DB_NAME: weather_data
+      DB_PASSWORD: luigi
+      DB_PORT: 5432
+      PORT: 3000
+    depends_on:
+      - db
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
 
 volumes:
   postgres_data:

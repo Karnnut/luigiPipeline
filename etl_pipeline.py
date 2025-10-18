@@ -343,7 +343,7 @@ class UploadToDatabase(luigi.Task):
             conn.execute(sqlalchemy.text("DROP TABLE IF EXISTS weather_data"))
     
         # Read and upload in chunks
-        chunk_size = 10000  # Adjust based on your RAM
+        chunk_size = 20000  # Adjust based on your RAM
         df = pl.read_parquet(self.parquet_path)
         total_rows = df.height
     

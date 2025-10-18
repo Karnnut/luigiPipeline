@@ -8,3 +8,4 @@ pyarrow==14.0.2
 numpy==1.26.2
 eccodes==1.6.1
 polars
+fastapi
